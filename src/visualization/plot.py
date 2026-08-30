@@ -1,41 +1,68 @@
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
 
 
-def plot_solution(
-    x: np.ndarray,
-    times: np.ndarray,
-    solutions: np.ndarray,
-    selected_times: list[float] | None = None,
-) -> None:
+def plot_population(
+    u: np.ndarray,
+    time: float | None = None,
+    title: str = "Population density"
+):
     """
-    Plot population density at selected times.
+    Plot a 2D population density field.
     """
 
-    if selected_times is None:
-        selected_times = [
-            times[0],
-            times[len(times) // 3],
-            times[2 * len(times) // 3],
-            times[-1],
-        ]
+    plt.figure(figsize=(7, 6))
 
-    plt.figure(figsize=(10, 6))
+    plt.imshow(
+        u,
+        origin="lower",
+        interpolation="nearest",
+        aspect="equal"
+    )
 
-    for target_time in selected_times:
-        index = np.argmin(np.abs(times - target_time))
+    plt.colorbar(
+        label="Population density"
+    )
 
-        plt.plot(
-            x,
-            solutions[index],
-            label=f"t = {times[index]:.2f}",
-        )
+    if time is not None:
+        title = f"{title} (t = {time:.2f})"
 
+    plt.title(title)
     plt.xlabel("x")
-    plt.ylabel("Population density")
-    plt.title("1D Fisher-KPP model")
-    plt.legend()
-    plt.grid(True)
+    plt.ylabel("y")
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_snapshots(
+    times: np.ndarray,
+    solutions: np.ndarray,
+    indices: list[int]
+):
+    """
+    Plot several snapshots of the simulation.
+
+    Parameters
+    ----------
+    times :
+        Saved simulation times.
+
+    solutions :
+        Array with shape (T, Ny, Nx).
+
+    indices :
+        Indices of snapshots to display.
+    """
+
+    for index in indices:
+
+        if index < 0 or index >= len(solutions):
+            raise IndexError(
+                f"Snapshot index {index} is out of range."
+            )
+
+        plot_population(
+            solutions[index],
+            time=times[index]
+        )

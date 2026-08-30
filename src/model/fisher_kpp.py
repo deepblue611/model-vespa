@@ -1,49 +1,58 @@
 import numpy as np
 
 
-def logistic_growth(u: np.ndarray, r: float, K: float) -> np.ndarray:
+class FisherKPP:
     """
-    Logistic growth term:
+    2D Fisher-KPP reaction-diffusion model.
 
-        f(u) = r * u * (1 - u / K)
+        du/dt = D * Laplacian(u) + r*u*(1-u/K)
 
     Parameters
     ----------
-    u : np.ndarray
-        Population density.
+    D : float
+        Diffusion coefficient.
     r : float
         Intrinsic growth rate.
     K : float
         Carrying capacity.
-
-    Returns
-    -------
-    np.ndarray
-        Growth rate at each spatial point.
     """
-    return r * u * (1.0 - u / K)
 
+    def __init__(self, D: float, r: float, K: float):
+        if D < 0:
+            raise ValueError("D must be non-negative.")
 
-def fisher_kpp_rhs(
-    u: np.ndarray,
-    D: float,
-    r: float,
-    K: float,
-    dx: float,
-) -> np.ndarray:
-    """
-    Compute the spatial RHS of the 1D Fisher-KPP equation:
+        if r < 0:
+            raise ValueError("r must be non-negative.")
 
-        du/dt = D * d²u/dx² + r*u*(1-u/K)
+        if K <= 0:
+            raise ValueError("K must be positive.")
 
-    Interior points only.
+        self.D = D
+        self.r = r
+        self.K = K
 
-    Boundary points are handled separately by the solver.
-    """
-    diffusion = D * (
-        u[2:] - 2.0 * u[1:-1] + u[:-2]
-    ) / (dx ** 2)
+    def reaction(self, u: np.ndarray) -> np.ndarray:
+        """
+        Logistic growth term:
 
-    growth = logistic_growth(u[1:-1], r, K)
+            r*u*(1-u/K)
+        """
+        return self.r * u * (1.0 - u / self.K)
 
-    return diffusion + growth
+    def diffusion(self, laplacian_u: np.ndarray) -> np.ndarray:
+        """
+        Diffusion term:
+
+            D * Laplacian(u)
+        """
+        return self.D * laplacian_u
+
+    def rhs(
+        self,
+        u: np.ndarray,
+        laplacian_u: np.ndarray
+    ) -> np.ndarray:
+        """
+        Right-hand side of the Fisher-KPP equation.
+        """
+        return self.diffusion(laplacian_u) + self.reaction(u)

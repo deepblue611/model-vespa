@@ -1,96 +1,114 @@
 import numpy as np
 
-from src.model.fisher_kpp import fisher_kpp_rhs
 
-
-def apply_neumann_boundary(u: np.ndarray) -> None:
+class FiniteDifference2D:
     """
-    Apply zero-flux Neumann boundary conditions:
-
-        du/dx = 0
-
-    at both boundaries.
-    """
-    u[0] = u[1]
-    u[-1] = u[-2]
-
-
-def solve_fisher_kpp(
-    u0: np.ndarray,
-    D: float,
-    r: float,
-    K: float,
-    dx: float,
-    dt: float,
-    n_steps: int,
-    save_every: int = 1,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Solve the 1D Fisher-KPP equation using explicit Euler
-    time integration and second-order finite differences.
-
-        du/dt = D*u_xx + r*u*(1-u/K)
-
-    Boundary condition:
-        du/dx = 0
-
-    Returns
-    -------
-    times : np.ndarray
-        Saved simulation times.
-
-    solutions : np.ndarray
-        Population density.
-
-        Shape:
-            (number_of_saved_steps, number_of_grid_points)
+    Explicit finite-difference solver for a 2D reaction-diffusion PDE.
     """
 
-    u = np.array(u0, dtype=float, copy=True)
+    def __init__(
+        self,
+        dx: float,
+        dy: float,
+        dt: float
+    ):
+        if dx <= 0 or dy <= 0:
+            raise ValueError("dx and dy must be positive.")
 
-    # Explicit diffusion stability condition:
-    # D * dt / dx^2 <= 1/2
-    diffusion_number = D * dt / (dx ** 2)
+        if dt <= 0:
+            raise ValueError("dt must be positive.")
 
-    if diffusion_number > 0.5:
-        raise ValueError(
-            f"Unstable timestep: D*dt/dx^2 = "
-            f"{diffusion_number:.4f} > 0.5"
+        self.dx = dx
+        self.dy = dy
+        self.dt = dt
+
+    def laplacian(self, u: np.ndarray) -> np.ndarray:
+        """
+        Calculate the 2D Laplacian using central finite differences.
+
+        ∇²u =
+            d²u/dx² + d²u/dy²
+
+        Boundary condition:
+            zero-flux (Neumann)
+        """
+
+        # Neumann boundary condition:
+        # replicate boundary values
+        padded = np.pad(
+            u,
+            pad_width=1,
+            mode="edge"
         )
 
-    solutions = [u.copy()]
-    times = [0.0]
+        d2x = (
+            padded[1:-1, 2:]
+            - 2.0 * u
+            + padded[1:-1, :-2]
+        ) / (self.dx ** 2)
 
-    for step in range(1, n_steps + 1):
+        d2y = (
+            padded[2:, 1:-1]
+            - 2.0 * u
+            + padded[:-2, 1:-1]
+        ) / (self.dy ** 2)
 
-        rhs = fisher_kpp_rhs(
-            u=u,
-            D=D,
-            r=r,
-            K=K,
-            dx=dx,
+        return d2x + d2y
+
+    def step(self, u: np.ndarray, model) -> np.ndarray:
+        """
+        Perform one explicit Euler time step.
+        """
+
+        laplacian_u = self.laplacian(u)
+
+        du_dt = model.rhs(
+            u,
+            laplacian_u
         )
 
-        u[1:-1] += dt * rhs
+        u_next = u + self.dt * du_dt
 
-        apply_neumann_boundary(u)
+        # Numerical errors should not create negative population.
+        u_next = np.maximum(u_next, 0.0)
 
-        # Numerical sanity check
-        if np.any(~np.isfinite(u)):
-            raise FloatingPointError(
-                "Non-finite population density encountered."
-            )
+        return u_next
 
-        if np.any(u < -1e-12):
-            raise FloatingPointError(
-                "Negative population density encountered."
-            )
+    def solve(
+        self,
+        u0: np.ndarray,
+        model,
+        steps: int,
+        save_every: int = 1
+    ):
+        """
+        Run the simulation.
 
-        # Remove tiny numerical negative values.
-        u[u < 0.0] = 0.0
+        Returns
+        -------
+        times : np.ndarray
+        solutions : np.ndarray
+            Shape:
+                (number_of_saved_steps, Ny, Nx)
+        """
 
-        if step % save_every == 0:
-            solutions.append(u.copy())
-            times.append(step * dt)
+        if steps <= 0:
+            raise ValueError("steps must be positive.")
 
-    return np.array(times), np.array(solutions)
+        u = np.array(u0, dtype=float, copy=True)
+
+        solutions = [u.copy()]
+        times = [0.0]
+
+        for step in range(1, steps + 1):
+
+            u = self.step(u, model)
+
+            if step % save_every == 0:
+                solutions.append(u.copy())
+                times.append(step * self.dt)
+
+        return (
+            np.array(times),
+            np.array(solutions)
+        )
