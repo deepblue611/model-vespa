@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# PyCharm
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Simulation outputs
+outputs/
+
+# Large data
+data/raw/
+data/processed/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,10 @@
+numpy
+scipy
+matplotlib
+pandas
+jupyter
+tqdm
+
+pytest
+black
+ruff
