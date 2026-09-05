@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from pyproj import Transformer
 
 
@@ -11,262 +12,344 @@ from pyproj import Transformer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-RAW_DIR = PROJECT_ROOT / "data" / "raw" / "korea-alt"
-OUTPUT_FILE = (
+# Complete DEM
+INPUT_FILE = (
+    PROJECT_ROOT
+    / "data"
+    / "raw"
+    / "korea-alt-complete"
+    / "korea_altitude_complete.csv"
+)
+
+# Output directory
+OUTPUT_DIR = (
     PROJECT_ROOT
     / "data"
     / "processed"
-    / "korea_dem_500m.csv"
+    / "dem_500m"
 )
 
-INPUT_CRS = "EPSG:4326"   # longitude / latitude
-OUTPUT_CRS = "EPSG:5179"  # Korea 2000 / Unified CS
+OUTPUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
 
-GRID_SIZE = 500.0         # 500 m × 500 m
-CHUNK_SIZE = 200_000
+OUTPUT_CSV = OUTPUT_DIR / "korea_dem_500m.csv"
+OUTPUT_NPY = OUTPUT_DIR / "korea_dem_500m.npy"
+OUTPUT_FIGURE = OUTPUT_DIR / "korea_dem_500m.png"
 
 
-# ============================================================
-# File discovery
-# ============================================================
+# Coordinate systems
+INPUT_CRS = "EPSG:4326"
+OUTPUT_CRS = "EPSG:5179"
 
-def get_input_files():
-    """
-    Find korea-alt 1~45 CSV files.
+# Target grid resolution
+GRID_SIZE = 500.0
 
-    Supports both:
-        korea-alt (1).csv
-        korea-alt 1.csv
-    """
-
-    files = []
-
-    for i in range(1, 46):
-        candidates = [
-            RAW_DIR / f"korea-alt ({i}).csv",
-            #RAW_DIR / f"korea-alt {i}.csv",
-        ]
-
-        found = next((p for p in candidates if p.exists()), None)
-
-        if found is None:
-            raise FileNotFoundError(
-                f"Could not find DEM file #{i}. "
-                f"Expected one of: {candidates}"
-            )
-
-        files.append(found)
-
-    return files
+# Number of source rows read at once
+CHUNK_SIZE = 500_000
 
 
 # ============================================================
-# Coordinate transformation
+# Find columns
 # ============================================================
 
-def transform_coordinates(x, y, transformer):
-    """
-    Transform longitude/latitude to projected coordinates.
-    """
+def find_columns():
 
-    x_projected, y_projected = transformer.transform(x, y)
-
-    return (
-        np.asarray(x_projected),
-        np.asarray(y_projected),
+    sample = pd.read_csv(
+        INPUT_FILE,
+        nrows=5
     )
 
+    print("Input columns:")
+    print(sample.columns.tolist())
+
+    columns = {}
+
+    for col in sample.columns:
+
+        name = col.strip().lower()
+
+        if name in {
+            "x",
+            "lon",
+            "longitude"
+        }:
+            columns["x"] = col
+
+        elif name in {
+            "y",
+            "lat",
+            "latitude"
+        }:
+            columns["y"] = col
+
+        elif name in {
+            "elevation",
+            "altitude",
+            "elev",
+            "height",
+            "z"
+        }:
+            columns["elevation"] = col
+
+    required = {
+        "x",
+        "y",
+        "elevation"
+    }
+
+    missing = required - set(columns)
+
+    if missing:
+        raise ValueError(
+            f"Could not identify columns: {missing}"
+        )
+
+    return columns
+
 
 # ============================================================
-# Find global spatial extent
+# Find projected extent
 # ============================================================
 
-def find_global_extent(files, transformer):
-    """
-    Find the global projected-coordinate extent of all 45 DEM tiles.
-    """
+def find_extent(columns, transformer):
+
+    print("\nFinding spatial extent...")
 
     min_x = np.inf
     max_x = -np.inf
+
     min_y = np.inf
     max_y = -np.inf
 
-    for file in files:
-        print(f"[Extent] {file.name}")
+    total_rows = 0
 
-        df = pd.read_csv(
-            file,
-            usecols=["X", "Y"],
+    for chunk in pd.read_csv(
+        INPUT_FILE,
+        usecols=[
+            columns["x"],
+            columns["y"]
+        ],
+        chunksize=CHUNK_SIZE
+    ):
+
+        total_rows += len(chunk)
+
+        x = chunk[
+            columns["x"]
+        ].to_numpy()
+
+        y = chunk[
+            columns["y"]
+        ].to_numpy()
+
+        px, py = transformer.transform(
+            x,
+            y
         )
 
-        x, y = transform_coordinates(
-            df["X"].to_numpy(),
-            df["Y"].to_numpy(),
-            transformer,
+        min_x = min(
+            min_x,
+            np.min(px)
         )
 
-        min_x = min(min_x, np.min(x))
-        max_x = max(max_x, np.max(x))
-        min_y = min(min_y, np.min(y))
-        max_y = max(max_y, np.max(y))
+        max_x = max(
+            max_x,
+            np.max(px)
+        )
 
-    return min_x, max_x, min_y, max_y
+        min_y = min(
+            min_y,
+            np.min(py)
+        )
+
+        max_y = max(
+            max_y,
+            np.max(py)
+        )
+
+    return (
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        total_rows
+    )
 
 
 # ============================================================
 # Downscale
 # ============================================================
 
-def downscale_dem(files, transformer):
+def downscale(
+    columns,
+    transformer,
+    origin_x,
+    origin_y
+):
     """
-    Aggregate 90 m DEM points into 500 m × 500 m cells.
+    90 m DEM -> 500 m DEM
 
-    For each 500 m cell:
+    Each 500m cell receives the mean elevation
+    of all source points inside that cell.
 
-        elevation = mean(elevation of all 90 m points)
-
-    Sea-level values (elevation == 0) are preserved.
+    elevation = 0 is preserved.
     """
 
-    print("\nFinding global extent...")
+    print("\nDownscaling...")
 
-    min_x, max_x, min_y, max_y = find_global_extent(
-        files,
-        transformer,
-    )
-
-    # Align the grid to 500 m boundaries.
-    origin_x = np.floor(min_x / GRID_SIZE) * GRID_SIZE
-    origin_y = np.floor(min_y / GRID_SIZE) * GRID_SIZE
-
-    print("\nGlobal extent:")
-    print(f"  X: {min_x:.2f} ~ {max_x:.2f}")
-    print(f"  Y: {min_y:.2f} ~ {max_y:.2f}")
-
-    print("\n500 m grid origin:")
-    print(f"  X0 = {origin_x:.2f}")
-    print(f"  Y0 = {origin_y:.2f}")
-
-    # --------------------------------------------------------
-    # Accumulators
-    #
-    # key = (grid_x, grid_y)
-    # value = [sum of elevation, number of observations]
-    #
-    # This allows us to process the 45 files chunk-by-chunk.
-    # --------------------------------------------------------
-
-    sums = {}
-    counts = {}
+    partial_results = []
 
     total_rows = 0
 
-    for file_index, file in enumerate(files, start=1):
+    for chunk_id, chunk in enumerate(
+        pd.read_csv(
+            INPUT_FILE,
+            usecols=[
+                columns["x"],
+                columns["y"],
+                columns["elevation"]
+            ],
+            chunksize=CHUNK_SIZE
+        ),
+        start=1
+    ):
 
-        print(
-            f"\n[{file_index:02d}/45] "
-            f"Processing {file.name}"
+        total_rows += len(chunk)
+
+        x = chunk[
+            columns["x"]
+        ].to_numpy()
+
+        y = chunk[
+            columns["y"]
+        ].to_numpy()
+
+        elevation = pd.to_numeric(
+            chunk[
+                columns["elevation"]
+            ],
+            errors="coerce"
+        ).to_numpy(
+            dtype=np.float64
         )
 
-        for chunk in pd.read_csv(
-            file,
-            usecols=["X", "Y", "elevation"],
-            chunksize=CHUNK_SIZE,
-        ):
-
-            total_rows += len(chunk)
-
-            x, y = transform_coordinates(
-                chunk["X"].to_numpy(),
-                chunk["Y"].to_numpy(),
-                transformer,
-            )
-
-            elevation = chunk["elevation"].to_numpy(
-                dtype=np.float64
-            )
-
-            # ------------------------------------------------
-            # Convert projected coordinates to 500 m grid index
-            # ------------------------------------------------
-
-            ix = np.floor(
-                (x - origin_x) / GRID_SIZE
-            ).astype(np.int64)
-
-            iy = np.floor(
-                (y - origin_y) / GRID_SIZE
-            ).astype(np.int64)
-
-            # ------------------------------------------------
-            # Aggregate within this chunk
-            # ------------------------------------------------
-
-            temp = pd.DataFrame({
-                "ix": ix,
-                "iy": iy,
-                "elevation": elevation,
-            })
-
-            grouped = temp.groupby(
-                ["ix", "iy"],
-                sort=False,
-            )["elevation"].agg(
-                ["sum", "count"]
-            )
-
-            # ------------------------------------------------
-            # Merge chunk result into global accumulator
-            # ------------------------------------------------
-
-            for (gx, gy), row in grouped.iterrows():
-
-                key = (int(gx), int(gy))
-
-                if key not in sums:
-                    sums[key] = 0.0
-                    counts[key] = 0
-
-                sums[key] += row["sum"]
-                counts[key] += int(row["count"])
-
-        print(f"  Processed rows: {total_rows:,}")
-
-    # ========================================================
-    # Construct final DataFrame
-    # ========================================================
-
-    print("\nConstructing 500 m DEM...")
-
-    rows = []
-
-    for (ix, iy), total_elevation in sums.items():
-
-        count = counts[(ix, iy)]
-
-        mean_elevation = total_elevation / count
-
-        # Center of the 500 m cell
-        center_x = (
-            origin_x
-            + (ix + 0.5) * GRID_SIZE
+        # Coordinate transformation
+        px, py = transformer.transform(
+            x,
+            y
         )
 
-        center_y = (
-            origin_y
-            + (iy + 0.5) * GRID_SIZE
+        # Remove invalid rows only
+        valid = (
+            np.isfinite(px)
+            & np.isfinite(py)
+            & np.isfinite(elevation)
         )
 
-        rows.append({
-            "ix": ix,
+        px = px[valid]
+        py = py[valid]
+        elevation = elevation[valid]
+
+        # 500m grid indices
+        ix = np.floor(
+            (px - origin_x)
+            / GRID_SIZE
+        ).astype(np.int64)
+
+        iy = np.floor(
+            (py - origin_y)
+            / GRID_SIZE
+        ).astype(np.int64)
+
+        temp = pd.DataFrame({
             "iy": iy,
-            "x": center_x,
-            "y": center_y,
-            "elevation": mean_elevation,
-            "n_points": count,
+            "ix": ix,
+            "elevation": elevation
         })
 
-    result = pd.DataFrame(rows)
+        # Aggregate this chunk
+        grouped = (
+            temp
+            .groupby(
+                ["iy", "ix"],
+                sort=False
+            )["elevation"]
+            .agg(
+                elevation_sum="sum",
+                n_points="count"
+            )
+            .reset_index()
+        )
+
+        partial_results.append(grouped)
+
+        print(
+            f"Chunk {chunk_id:>4}: "
+            f"{total_rows:,} rows"
+        )
+
+    # --------------------------------------------------------
+    # Merge partial results
+    # --------------------------------------------------------
+
+    print("\nMerging aggregated chunks...")
+
+    combined = pd.concat(
+        partial_results,
+        ignore_index=True
+    )
+
+    # Same 500m cells can occur in different chunks.
+    result = (
+        combined
+        .groupby(
+            ["iy", "ix"],
+            sort=False
+        )
+        .agg(
+            elevation_sum=(
+                "elevation_sum",
+                "sum"
+            ),
+            n_points=(
+                "n_points",
+                "sum"
+            )
+        )
+        .reset_index()
+    )
+
+    # Mean elevation
+    result["elevation"] = (
+        result["elevation_sum"]
+        / result["n_points"]
+    )
+
+    # Cell center coordinates
+    result["x"] = (
+        origin_x
+        + (result["ix"] + 0.5)
+        * GRID_SIZE
+    )
+
+    result["y"] = (
+        origin_y
+        + (result["iy"] + 0.5)
+        * GRID_SIZE
+    )
+
+    result = result[
+        [
+            "ix",
+            "iy",
+            "x",
+            "y",
+            "elevation",
+            "n_points"
+        ]
+    ]
 
     result = result.sort_values(
         ["iy", "ix"]
@@ -276,51 +359,387 @@ def downscale_dem(files, transformer):
 
 
 # ============================================================
+# Convert to 2D array
+# ============================================================
+
+def make_2d_dem(
+    df,
+    origin_x,
+    origin_y
+):
+
+    ix_min = int(
+        df["ix"].min()
+    )
+
+    ix_max = int(
+        df["ix"].max()
+    )
+
+    iy_min = int(
+        df["iy"].min()
+    )
+
+    iy_max = int(
+        df["iy"].max()
+    )
+
+    nx = ix_max - ix_min + 1
+    ny = iy_max - iy_min + 1
+
+    print("\n2D grid")
+    print("--------------------------------")
+    print(
+        f"X cells : {nx:,}"
+    )
+    print(
+        f"Y cells : {ny:,}"
+    )
+    print(
+        f"Shape   : ({ny}, {nx})"
+    )
+    print(
+        f"Total cells : {nx * ny:,}"
+    )
+    print(
+        f"Observed cells : {len(df):,}"
+    )
+
+    # NaN = no source data
+    dem = np.full(
+        (ny, nx),
+        np.nan,
+        dtype=np.float32
+    )
+
+    rows = (
+        df["iy"].to_numpy(
+            dtype=np.int64
+        )
+        - iy_min
+    )
+
+    cols = (
+        df["ix"].to_numpy(
+            dtype=np.int64
+        )
+        - ix_min
+    )
+
+    dem[
+        rows,
+        cols
+    ] = df[
+        "elevation"
+    ].to_numpy(
+        dtype=np.float32
+    )
+
+    # Coordinate axes
+    x = (
+        origin_x
+        + (
+            np.arange(
+                ix_min,
+                ix_max + 1
+            )
+            + 0.5
+        )
+        * GRID_SIZE
+    )
+
+    y = (
+        origin_y
+        + (
+            np.arange(
+                iy_min,
+                iy_max + 1
+            )
+            + 0.5
+        )
+        * GRID_SIZE
+    )
+
+    return dem, x, y
+
+
+# ============================================================
+# Plot
+# ============================================================
+
+def make_figure(
+    dem,
+    x,
+    y
+):
+
+    print("\nCreating DEM figure...")
+
+    extent = [
+        x[0] - GRID_SIZE / 2,
+        x[-1] + GRID_SIZE / 2,
+        y[0] - GRID_SIZE / 2,
+        y[-1] + GRID_SIZE / 2
+    ]
+
+    fig, ax = plt.subplots(
+        figsize=(12, 10)
+    )
+
+    image = ax.imshow(
+        dem,
+        origin="lower",
+        extent=extent,
+        aspect="equal",
+        interpolation="nearest"
+    )
+
+    ax.set_xlabel(
+        "X coordinate (m)"
+    )
+
+    ax.set_ylabel(
+        "Y coordinate (m)"
+    )
+
+    ax.set_title(
+        "Korea Digital Elevation Model\n"
+        "500 m × 500 m Grid"
+    )
+
+    colorbar = fig.colorbar(
+        image,
+        ax=ax
+    )
+
+    colorbar.set_label(
+        "Elevation (m)"
+    )
+
+    fig.tight_layout()
+
+    fig.savefig(
+        OUTPUT_FIGURE,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+
+    print(
+        f"Figure saved to:\n"
+        f"{OUTPUT_FIGURE}"
+    )
+
+
+# ============================================================
 # Main
 # ============================================================
 
 def main():
 
-    print("=== DEM 90m -> 500m preprocessing ===")
+    print(
+        "============================================"
+    )
+    print(
+        "Korea DEM 90m -> 500m"
+    )
+    print(
+        "============================================"
+    )
 
-    files = get_input_files()
+    # Check input
+    if not INPUT_FILE.exists():
 
-    print(f"\nFound {len(files)} DEM files.")
+        raise FileNotFoundError(
+            f"\nInput DEM not found:\n"
+            f"{INPUT_FILE}\n\n"
+            f"Expected location:\n"
+            f"data/raw/korea-altitude/"
+        )
 
+    print(
+        f"\nInput:\n{INPUT_FILE}"
+    )
+
+    # Coordinate transformer
     transformer = Transformer.from_crs(
         INPUT_CRS,
         OUTPUT_CRS,
-        always_xy=True,
+        always_xy=True
     )
 
-    result = downscale_dem(
-        files,
+    # --------------------------------------------------------
+    # 1. Columns
+    # --------------------------------------------------------
+
+    columns = find_columns()
+
+    print(
+        "\nDetected columns:"
+    )
+
+    print(
+        f"X         = {columns['x']}"
+    )
+
+    print(
+        f"Y         = {columns['y']}"
+    )
+
+    print(
+        f"Elevation = {columns['elevation']}"
+    )
+
+    # --------------------------------------------------------
+    # 2. Extent
+    # --------------------------------------------------------
+
+    (
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        total_rows
+    ) = find_extent(
+        columns,
+        transformer
+    )
+
+    # Align grid to 500m boundaries
+    origin_x = (
+        np.floor(
+            min_x / GRID_SIZE
+        )
+        * GRID_SIZE
+    )
+
+    origin_y = (
+        np.floor(
+            min_y / GRID_SIZE
+        )
+        * GRID_SIZE
+    )
+
+    print(
+        f"\nSource rows: {total_rows:,}"
+    )
+
+    print(
+        f"Projected X: "
+        f"{min_x:.2f} ~ {max_x:.2f}"
+    )
+
+    print(
+        f"Projected Y: "
+        f"{min_y:.2f} ~ {max_y:.2f}"
+    )
+
+    print(
+        f"500m grid origin: "
+        f"({origin_x:.2f}, {origin_y:.2f})"
+    )
+
+    # --------------------------------------------------------
+    # 3. Downscale
+    # --------------------------------------------------------
+
+    dem_500 = downscale(
+        columns,
         transformer,
+        origin_x,
+        origin_y
     )
 
-    # Create output directory
-    OUTPUT_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
+    dem_500.to_csv(
+        OUTPUT_CSV,
+        index=False
     )
 
-    result.to_csv(
-        OUTPUT_FILE,
-        index=False,
+    print(
+        f"\n500m DEM saved:\n"
+        f"{OUTPUT_CSV}"
     )
 
-    print("\n========================================")
-    print("Finished!")
-    print("========================================")
+    # --------------------------------------------------------
+    # 4. 2D array
+    # --------------------------------------------------------
 
-    print(f"Output: {OUTPUT_FILE}")
-    print(f"Number of 500m cells: {len(result):,}")
+    dem, x, y = make_2d_dem(
+        dem_500,
+        origin_x,
+        origin_y
+    )
 
-    print("\nColumns:")
-    print(result.columns.tolist())
+    np.save(
+        OUTPUT_NPY,
+        dem
+    )
 
-    print("\nElevation statistics:")
-    print(result["elevation"].describe())
+    print(
+        f"\n2D DEM saved:\n"
+        f"{OUTPUT_NPY}"
+    )
+
+    # --------------------------------------------------------
+    # 5. Statistics
+    # --------------------------------------------------------
+
+    valid = dem[
+        np.isfinite(dem)
+    ]
+
+    print(
+        "\nElevation statistics"
+    )
+    print("--------------------------------")
+
+    print(
+        f"Minimum : "
+        f"{np.min(valid):.2f} m"
+    )
+
+    print(
+        f"Maximum : "
+        f"{np.max(valid):.2f} m"
+    )
+
+    print(
+        f"Mean    : "
+        f"{np.mean(valid):.2f} m"
+    )
+
+    print(
+        f"Median  : "
+        f"{np.median(valid):.2f} m"
+    )
+
+    print(
+        f"NaN cells : "
+        f"{np.isnan(dem).sum():,}"
+    )
+
+    # --------------------------------------------------------
+    # 6. Figure
+    # --------------------------------------------------------
+
+    make_figure(
+        dem,
+        x,
+        y
+    )
+
+    print(
+        "\n============================================"
+    )
+
+    print(
+        "Finished."
+    )
+
+    print(
+        "============================================"
+    )
 
 
 if __name__ == "__main__":
