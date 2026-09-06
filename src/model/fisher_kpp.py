@@ -9,16 +9,18 @@ class FisherKPP:
 
     Parameters
     ----------
-    D : float
-        Diffusion coefficient.
+    D : float or np.ndarray
+        Diffusion coefficient. Either a scalar (spatially constant)
+        or an array D(x,y) matching the population grid shape, e.g.
+        from `diffusion.terrain_diffusion`.
     r : float
         Intrinsic growth rate.
     K : float
         Carrying capacity.
     """
 
-    def __init__(self, D: float, r: float, K: float):
-        if D < 0:
+    def __init__(self, D: float | np.ndarray, r: float, K: float):
+        if np.any(np.asarray(D) < 0):
             raise ValueError("D must be non-negative.")
 
         if r < 0:

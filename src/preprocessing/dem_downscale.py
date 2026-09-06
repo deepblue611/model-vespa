@@ -12,14 +12,19 @@ from pyproj import Transformer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Complete DEM
+# Complete DEM (merged single file, WGS84 lon/lat)
 INPUT_FILE = (
     PROJECT_ROOT
     / "data"
     / "raw"
-    / "korea-alt-complete"
-    / "korea_altitude_complete.csv"
+    / "고도"
+    / "대한민국_고도_WGS84.csv"
 )
+
+# CSV text encoding. The source file is saved with a UTF-8 BOM,
+# which pandas otherwise folds into the first column's name
+# (e.g. "﻿X"), breaking column detection.
+INPUT_ENCODING = "utf-8-sig"
 
 # Output directory
 OUTPUT_DIR = (
@@ -58,7 +63,8 @@ def find_columns():
 
     sample = pd.read_csv(
         INPUT_FILE,
-        nrows=5
+        nrows=5,
+        encoding=INPUT_ENCODING
     )
 
     print("Input columns:")
@@ -131,7 +137,8 @@ def find_extent(columns, transformer):
             columns["x"],
             columns["y"]
         ],
-        chunksize=CHUNK_SIZE
+        chunksize=CHUNK_SIZE,
+        encoding=INPUT_ENCODING
     ):
 
         total_rows += len(chunk)
@@ -211,7 +218,8 @@ def downscale(
                 columns["y"],
                 columns["elevation"]
             ],
-            chunksize=CHUNK_SIZE
+            chunksize=CHUNK_SIZE,
+            encoding=INPUT_ENCODING
         ),
         start=1
     ):
@@ -555,7 +563,7 @@ def main():
             f"\nInput DEM not found:\n"
             f"{INPUT_FILE}\n\n"
             f"Expected location:\n"
-            f"data/raw/korea-altitude/"
+            f"data/raw/고도/대한민국_고도_WGS84.csv"
         )
 
     print(
