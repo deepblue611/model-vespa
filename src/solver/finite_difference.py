@@ -79,10 +79,17 @@ class FiniteDifference2D:
         u0: np.ndarray,
         model,
         steps: int,
-        save_every: int = 1
+        save_every: int = 1,
+        progress: bool = False
     ):
         """
         Run the simulation.
+
+        Parameters
+        ----------
+        progress : bool
+            If True, print a percentage-complete line to stdout as
+            the simulation runs.
 
         Returns
         -------
@@ -100,6 +107,8 @@ class FiniteDifference2D:
         solutions = [u.copy()]
         times = [0.0]
 
+        progress_every = max(1, steps // 100)
+
         for step in range(1, steps + 1):
 
             u = self.step(u, model)
@@ -107,6 +116,13 @@ class FiniteDifference2D:
             if step % save_every == 0:
                 solutions.append(u.copy())
                 times.append(step * self.dt)
+
+            if progress and (step % progress_every == 0 or step == steps):
+                pct = 100.0 * step / steps
+                print(f"\r  step {step}/{steps} ({pct:5.1f}%)", end="", flush=True)
+
+        if progress:
+            print()
 
         return (
             np.array(times),

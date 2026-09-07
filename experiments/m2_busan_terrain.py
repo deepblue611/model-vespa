@@ -44,8 +44,8 @@ BUSAN_LAT = 35.1028
 # Fisher-KPP parameters (placeholders -- tune to real spread data later)
 # D_MAX is capped so that DT_DAYS below stays CFL-stable -- see the
 # stability check in main().
-D_MAX = 1500.0       # m^2/day, diffusion on flat terrain
-D_MIN = 100.0        # m^2/day, diffusion on very steep terrain
+D_MAX = 90000.0       # m^2/day, diffusion on flat terrain
+D_MIN = 6000.0        # m^2/day, diffusion on very steep terrain
 SLOPE_SCALE = 0.15   # slope (rise/run) at which D drops halfway
 SLOPE_POWER = 1.5
 
@@ -57,9 +57,15 @@ INITIAL_DENSITY = K_CAPACITY
 
 # Invasive-species spread is slow relative to diffusion's natural time
 # scale, so we view it in coarse, human-meaningful steps.
-DT_DAYS = 15.0                  # solver time step
+DT_DAYS = 0.2                  # solver time step
 TOTAL_TIME_DAYS = 365.0 * 15.0  # simulate 15 years, whole-country spread
 CFL_SAFETY = 0.4
+
+# Saving a frame every solver step over 15 years on a whole-country grid
+# is hundreds of GB of RAM (steps * Ny * Nx * 8 bytes). Save on a coarser,
+# human-meaningful cadence instead -- the viewer only needs enough frames
+# for smooth playback, not one per solver step.
+SAVE_INTERVAL_DAYS = 30.0
 
 
 # ============================================================
@@ -294,10 +300,16 @@ def main():
 
     steps = int(TOTAL_TIME_DAYS / dt)
 
-    # dt already equals the desired viewing cadence, so save every step.
-    save_every = 1
-
-    print(f"dt = {dt:.1f} days, steps = {steps}, save_every = {save_every}")
+    # Save on SAVE_INTERVAL_DAYS cadence, not every solver step -- see
+    # the note next to SAVE_INTERVAL_DAYS for why.
+    save_every = max(1, round(SAVE_INTERVAL_DAYS / dt))
+    n_frames = steps // save_every + 1
+    frame_bytes = dem.shape[0] * dem.shape[1] * 8
+    print(
+        f"dt = {dt:.1f} days, steps = {steps}, save_every = {save_every} "
+        f"({save_every * dt:.1f} days/frame), ~{n_frames} frames "
+        f"(~{n_frames * frame_bytes / 1e9:.2f} GB)"
+    )
 
     model = FisherKPP(D=D_field, r=R_GROWTH, K=K_CAPACITY)
     solver = FiniteDifference2D(dx=GRID, dy=GRID, dt=dt)
@@ -305,7 +317,7 @@ def main():
     print("Running simulation...")
     start = time.perf_counter()
     times, solutions = solver.solve(
-        u0=u0, model=model, steps=steps, save_every=save_every
+        u0=u0, model=model, steps=steps, save_every=save_every, progress=True
     )
     elapsed = time.perf_counter() - start
     print(f"Done in {elapsed:.2f}s, saved {len(times)} frames.")
