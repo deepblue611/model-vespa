@@ -15,7 +15,7 @@ class KellerSegel2D:
     needing ghost cells.
     """
 
-    def __init__(self, dx: float, dy: float, dt: float):
+    def __init__(self, dx: float, dy: float, dt: float, xp=np):
         if dx <= 0 or dy <= 0:
             raise ValueError("dx and dy must be positive.")
 
@@ -25,6 +25,7 @@ class KellerSegel2D:
         self.dx = dx
         self.dy = dy
         self.dt = dt
+        self.xp = xp
 
     def gradient(self, field: np.ndarray):
         """
@@ -35,7 +36,7 @@ class KellerSegel2D:
         is needed here; it is only used to build a static drift field.
         """
 
-        padded = np.pad(field, pad_width=1, mode="edge")
+        padded = self.xp.pad(field, pad_width=1, mode="edge")
 
         grad_x = (padded[1:-1, 2:] - padded[1:-1, :-2]) / (2.0 * self.dx)
         grad_y = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / (2.0 * self.dy)
@@ -60,21 +61,22 @@ class KellerSegel2D:
         zero flux enforced at masked (sea) faces and the array boundary.
         """
 
+        xp = self.xp
         ny, nx = u.shape
 
         diff_x = (u[:, 1:] - u[:, :-1]) / self.dx
         face_open_x = mask[:, :-1] & mask[:, 1:]
-        diff_x = np.where(face_open_x, diff_x, 0.0)
+        diff_x = xp.where(face_open_x, diff_x, 0.0)
 
-        flux_x = np.zeros((ny, nx + 1))
+        flux_x = xp.zeros((ny, nx + 1))
         flux_x[:, 1:-1] = diff_x
         d2x = (flux_x[:, 1:] - flux_x[:, :-1]) / self.dx
 
         diff_y = (u[1:, :] - u[:-1, :]) / self.dy
         face_open_y = mask[:-1, :] & mask[1:, :]
-        diff_y = np.where(face_open_y, diff_y, 0.0)
+        diff_y = xp.where(face_open_y, diff_y, 0.0)
 
-        flux_y = np.zeros((ny + 1, nx))
+        flux_y = xp.zeros((ny + 1, nx))
         flux_y[1:-1, :] = diff_y
         d2y = (flux_y[1:, :] - flux_y[:-1, :]) / self.dy
 
@@ -93,29 +95,30 @@ class KellerSegel2D:
         faces and the array boundary.
         """
 
+        xp = self.xp
         ny, nx = u.shape
 
         vx_face = 0.5 * (velocity_x[:, :-1] + velocity_x[:, 1:])
         u_left = u[:, :-1]
         u_right = u[:, 1:]
-        flux_x = np.where(vx_face >= 0.0, vx_face * u_left, vx_face * u_right)
+        flux_x = xp.where(vx_face >= 0.0, vx_face * u_left, vx_face * u_right)
 
         face_open_x = mask[:, :-1] & mask[:, 1:]
-        flux_x = np.where(face_open_x, flux_x, 0.0)
+        flux_x = xp.where(face_open_x, flux_x, 0.0)
 
-        flux_x_padded = np.zeros((ny, nx + 1))
+        flux_x_padded = xp.zeros((ny, nx + 1))
         flux_x_padded[:, 1:-1] = flux_x
         div_x = (flux_x_padded[:, 1:] - flux_x_padded[:, :-1]) / self.dx
 
         vy_face = 0.5 * (velocity_y[:-1, :] + velocity_y[1:, :])
         u_bottom = u[:-1, :]
         u_top = u[1:, :]
-        flux_y = np.where(vy_face >= 0.0, vy_face * u_bottom, vy_face * u_top)
+        flux_y = xp.where(vy_face >= 0.0, vy_face * u_bottom, vy_face * u_top)
 
         face_open_y = mask[:-1, :] & mask[1:, :]
-        flux_y = np.where(face_open_y, flux_y, 0.0)
+        flux_y = xp.where(face_open_y, flux_y, 0.0)
 
-        flux_y_padded = np.zeros((ny + 1, nx))
+        flux_y_padded = xp.zeros((ny + 1, nx))
         flux_y_padded[1:-1, :] = flux_y
         div_y = (flux_y_padded[1:, :] - flux_y_padded[:-1, :]) / self.dy
 
@@ -138,9 +141,17 @@ class KellerSegel2D:
         u_next = u + self.dt * du_dt
 
         # Numerical errors should not create negative population.
-        u_next = np.maximum(u_next, 0.0)
+        u_next = self.xp.maximum(u_next, 0.0)
 
         return u_next
+
+    def _to_numpy(self, arr):
+        """Bring a solver-backend array (numpy or cupy) back to host numpy."""
+
+        if self.xp is np:
+            return arr.copy()
+
+        return self.xp.asnumpy(arr)
 
     def solve(
         self,
@@ -165,9 +176,10 @@ class KellerSegel2D:
         if steps <= 0:
             raise ValueError("steps must be positive.")
 
-        u = np.array(u0, dtype=float, copy=True)
+        xp = self.xp
+        u = xp.array(u0, dtype=float, copy=True)
 
-        solutions = [u.copy()]
+        solutions = [self._to_numpy(u)]
         times = [0.0]
 
         progress_every = max(1, steps // 100)
@@ -177,7 +189,7 @@ class KellerSegel2D:
             u = self.step(u, model, velocity_x, velocity_y)
 
             if step % save_every == 0:
-                solutions.append(u.copy())
+                solutions.append(self._to_numpy(u))
                 times.append(step * self.dt)
 
             if progress and (step % progress_every == 0 or step == steps):
@@ -199,6 +211,7 @@ def stable_dt(
     velocity_y: np.ndarray,
     dx: float,
     dy: float,
+    xp=np,
 ) -> float:
     """
     Explicit-Euler CFL limit for the combined diffusion + upwind-advection
@@ -207,12 +220,14 @@ def stable_dt(
         dt <= 1 / (2*D_u*(1/dx^2 + 1/dy^2) + max|vx|/dx + max|vy|/dy)
 
     Callers should apply a safety factor (e.g. 0.4-0.5) to the result.
+    `velocity_x`/`velocity_y` may be numpy or cupy arrays -- pass the
+    matching `xp` module; the result is always a plain Python float.
     """
 
     diffusion_rate = 2.0 * D_u * (1.0 / dx ** 2 + 1.0 / dy ** 2)
     advection_rate = (
-        np.max(np.abs(velocity_x)) / dx
-        + np.max(np.abs(velocity_y)) / dy
+        float(xp.max(xp.abs(velocity_x))) / dx
+        + float(xp.max(xp.abs(velocity_y))) / dy
     )
 
     return 1.0 / (diffusion_rate + advection_rate)

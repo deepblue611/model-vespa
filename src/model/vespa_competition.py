@@ -39,6 +39,10 @@ class VespaCompetition:
     mask : np.ndarray of bool
         True where the cell is land (part of the simulation domain).
         Every term is forced to zero outside the mask.
+    xp : module
+        Array module the input arrays belong to -- `numpy` (default) or
+        `cupy` for a GPU-resident run. All array ops use this module so
+        the same class works on either backend.
     """
 
     def __init__(
@@ -51,6 +55,7 @@ class VespaCompetition:
         K_v: float,
         S_v: np.ndarray,
         mask: np.ndarray,
+        xp=np,
     ):
         if D_u < 0:
             raise ValueError("D_u must be non-negative.")
@@ -67,7 +72,7 @@ class VespaCompetition:
         if C_u.shape != mask.shape or S_v.shape != mask.shape:
             raise ValueError("C_u, S_v and mask must share the same shape.")
 
-        if np.any(C_u[mask] <= 0):
+        if xp.any(C_u[mask] <= 0):
             raise ValueError("C_u must be positive on every land cell.")
 
         self.D_u = D_u
@@ -75,13 +80,14 @@ class VespaCompetition:
         self.alpha = alpha
         self.beta = beta
         self.mask = mask
+        self.xp = xp
 
         # Sea cells are excluded from every output term below, but C_u
         # still needs a finite, positive value there so that 1 - u/C_u
         # does not divide by zero while the RHS is being computed.
-        self.C_u = np.where(mask, C_u, 1.0)
+        self.C_u = xp.where(mask, C_u, 1.0)
 
-        self.v = K_v * np.where(mask, S_v, 0.0)
+        self.v = K_v * xp.where(mask, S_v, 0.0)
 
     def reaction(self, u: np.ndarray) -> np.ndarray:
         """
@@ -92,7 +98,7 @@ class VespaCompetition:
         growth = self.alpha * u * (1.0 - u / self.C_u)
         competition = self.beta * u * self.v
 
-        return np.where(self.mask, growth - competition, 0.0)
+        return self.xp.where(self.mask, growth - competition, 0.0)
 
     def diffusion(self, laplacian_u: np.ndarray) -> np.ndarray:
         """
@@ -124,4 +130,4 @@ class VespaCompetition:
             + self.reaction(u)
         )
 
-        return np.where(self.mask, du_dt, 0.0)
+        return self.xp.where(self.mask, du_dt, 0.0)
