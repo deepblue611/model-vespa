@@ -22,6 +22,10 @@ sys.path.append(str(ROOT))
 
 from src.model.vespa_competition import VespaCompetition
 from src.solver.keller_segel import KellerSegel2D, stable_dt
+from src.experiment_utils import (
+    load_vespa_fields, to_grid_index, nearest_land_cell,
+    create_point_source, ensure_gpu_interpreter,
+)
 
 # ============================================================
 # Configuration
@@ -60,18 +64,8 @@ BACKEND = "gpu"   # "cpu" or "gpu" -- see note above
 # this same script there instead of failing on `import cupy`.
 GPU_PYTHON = r"C:\gpuvenv\Scripts\python.exe"
 
-if BACKEND == "gpu" and Path(sys.executable).resolve() != Path(GPU_PYTHON).resolve():
-    import subprocess
-
-    if not Path(GPU_PYTHON).exists():
-        raise RuntimeError(
-            f"BACKEND='gpu' but the GPU venv interpreter was not found at "
-            f"{GPU_PYTHON} -- see the note above for how to set it up."
-        )
-
-    print(f"BACKEND='gpu': relaunching under {GPU_PYTHON} ...")
-    result = subprocess.run([GPU_PYTHON, __file__, *sys.argv[1:]])
-    sys.exit(result.returncode)
+if BACKEND == "gpu":
+    ensure_gpu_interpreter(GPU_PYTHON)
 
 if BACKEND == "gpu":
     import cupy as xp
@@ -91,9 +85,9 @@ BUSAN_LAT = 35.1028
 # with the values below -- taxis adds further, non-uniform speedup on
 # top of this.
 D_U = 1_510_190.0   # m^2/day, random-walk diffusion (literature)
-CHI_U = 1e5    # m^2/day per unit of C_u, taxis sensitivity (placeholder)
+CHI_U = 1e5*5    # m^2/day per unit of C_u, taxis sensitivity (placeholder)
 ALPHA = 0.00077041   # per day, intrinsic logistic growth rate (literature)
-BETA = 0.3 * ALPHA   # per day per unit v, competition strength (placeholder)
+BETA = 0.5 * ALPHA   # per day per unit v, competition strength (placeholder)
 K_V = 1.0         # scales normalized suitability into a native density (literature)
 
 INITIAL_RADIUS_M = 500.0   # ~1 grid cell: a founding introduction is
@@ -111,113 +105,58 @@ DT_SAFETY = 0.4
 TOTAL_TIME_DAYS = 365.0 * 20.0
 SAVE_INTERVAL_DAYS = 90.0
 
-
-# ============================================================
-# Data loading
-# ============================================================
-
-def block_reduce_1d(arr, factor):
-    """Average consecutive groups of `factor` cell centers onto a coarser axis."""
-
-    n = arr.shape[0] - arr.shape[0] % factor
-    return arr[:n].reshape(n // factor, factor).mean(axis=1)
-
-
-def block_reduce_fields(land_mask, C_u, S_v, factor):
-    """
-    Coarsen land_mask/C_u/S_v by block-averaging factor x factor cells.
-
-    A coarse cell is land if a majority of its sub-cells are land; C_u/S_v
-    are averaged over land sub-cells only (sea sub-cells, which carry no
-    valid value, are excluded rather than dragging the average toward 0).
-    """
-
-    ny, nx = land_mask.shape
-    ny2, nx2 = ny - ny % factor, nx - nx % factor
-
-    mask_blocks = land_mask[:ny2, :nx2].reshape(ny2 // factor, factor, nx2 // factor, factor)
-    land_count = mask_blocks.sum(axis=(1, 3))
-    coarse_mask = land_count > (factor * factor) / 2
-
-    def masked_mean(field):
-        blocks = field[:ny2, :nx2].reshape(ny2 // factor, factor, nx2 // factor, factor)
-        land_sum = np.where(mask_blocks, blocks, 0.0).sum(axis=(1, 3))
-        return land_sum / np.maximum(land_count, 1)
-
-    coarse_C_u = np.where(coarse_mask, np.maximum(masked_mean(C_u), 1e-6), 1.0)
-    coarse_S_v = np.where(coarse_mask, masked_mean(S_v), 0.0)
-
-    return coarse_mask, coarse_C_u, coarse_S_v
-
-
-def load_fields():
-    land_mask = np.load(DATA_DIR / "land_mask_500m.npy")
-    C_u = np.load(DATA_DIR / "carrying_capacity_Cu_500m.npy").astype(float)
-    S_v = np.load(DATA_DIR / "suitability_Sv_normalized_500m.npy").astype(float)
-    x_centers = np.load(DATA_DIR / "grid_x_500m.npy")
-    y_centers = np.load(DATA_DIR / "grid_y_500m.npy")
-
-    if GRID_FACTOR > 1:
-        land_mask, C_u, S_v = block_reduce_fields(land_mask, C_u, S_v, GRID_FACTOR)
-        x_centers = block_reduce_1d(x_centers, GRID_FACTOR)
-        y_centers = block_reduce_1d(y_centers, GRID_FACTOR)
-
-    return land_mask, C_u, S_v, x_centers, y_centers
-
-
-def to_grid_index(lon, lat, transformer, x_centers, y_centers):
-    px, py = transformer.transform(lon, lat)
-
-    col = int(np.argmin(np.abs(x_centers - px)))
-    row = int(np.argmin(np.abs(y_centers - py)))
-
-    return row, col
-
-
-def nearest_land_cell(mask, row, col):
-    """Snap to the nearest land cell if (row, col) itself has no SDM
-    coverage (e.g. Busan's exact point falling on a harbor cell)."""
-
-    if mask[row, col]:
-        return row, col
-
-    land_rows, land_cols = np.nonzero(mask)
-    distances = (land_rows - row) ** 2 + (land_cols - col) ** 2
-    nearest = np.argmin(distances)
-
-    return int(land_rows[nearest]), int(land_cols[nearest])
-
-
-# ============================================================
-# Initial condition
-# ============================================================
-
-def create_point_source(shape, center_row, center_col, radius_m, density):
-    """Circular initial population centered on a single grid cell."""
-
-    ny, nx = shape
-
-    rows = np.arange(ny).reshape(-1, 1)
-    cols = np.arange(nx).reshape(1, -1)
-
-    distance = np.sqrt(
-        ((rows - center_row) * GRID) ** 2
-        + ((cols - center_col) * GRID) ** 2
-    )
-
-    u0 = np.zeros(shape)
-    u0[distance <= radius_m] = density
-
-    return u0
+# The spread boundary is drawn where u crosses this fraction of the final
+# frame's own max density -- NOT a fraction of local carrying capacity
+# C_u. With these literature D_U/ALPHA values, u can stay many orders of
+# magnitude below C_u for a long time (the population diffuses across
+# most of the country well before it saturates locally anywhere -- see
+# the m3_chi_beta_sweep.py findings), so a C_u-relative "established"
+# threshold stays empty for a very long transient. A max-relative
+# threshold instead always traces the actual spread pattern, whatever
+# its absolute scale.
+SPREAD_BOUNDARY_FRACTION_OF_MAX = 0.05
+HOTSPOT_TOP_N = 15   # densest land cells to mark
 
 
 # ============================================================
 # Visualization
 # ============================================================
 
+def draw_spread_overlay(ax, land_mask, x_centers, y_centers, u, linewidth=1.5, marker_size=30):
+    """
+    Draw the spread boundary contour (u crosses
+    SPREAD_BOUNDARY_FRACTION_OF_MAX * max(u) for this frame) and the
+    densest cells as hotspot markers onto an existing axes. Shared by
+    save_snapshot_figure (one frame per panel) and
+    save_spread_analysis_figure (final frame only).
+    """
+
+    land_u = np.where(land_mask, u, 0.0)
+    max_density = float(np.nanmax(land_u))
+
+    if max_density <= 0:
+        return
+
+    boundary_level = SPREAD_BOUNDARY_FRACTION_OF_MAX * max_density
+    X, Y = np.meshgrid(x_centers, y_centers)
+    ax.contour(X, Y, land_u, levels=[boundary_level], colors="cyan", linewidths=linewidth)
+
+    n_hotspots = min(HOTSPOT_TOP_N, int(land_mask.sum()))
+    density_land_only = np.where(land_mask, u, -np.inf)
+    flat_indices = np.argpartition(density_land_only.ravel(), -n_hotspots)[-n_hotspots:]
+    rows, cols = np.unravel_index(flat_indices, u.shape)
+
+    ax.scatter(
+        x_centers[cols], y_centers[rows],
+        marker="^", color="lime", edgecolors="black", s=marker_size, zorder=5,
+    )
+
+
 def save_snapshot_figure(land_mask, x_centers, y_centers, times, solutions, busan_xy):
     """Save a static multi-panel figure of the run (does not require a
-    display), so the simulation output is inspectable without a GUI."""
+    display), so the simulation output is inspectable without a GUI.
+    Each panel also gets the spread boundary + density hotspot overlay
+    (see draw_spread_overlay), scaled to that panel's own frame."""
 
     extent = [
         x_centers[0] - GRID / 2, x_centers[-1] + GRID / 2,
@@ -240,18 +179,76 @@ def save_snapshot_figure(land_mask, x_centers, y_centers, times, solutions, busa
             origin="lower", extent=extent, cmap="inferno",
             vmin=0.0, vmax=vmax,
         )
+        draw_spread_overlay(ax, land_mask, x_centers, y_centers, solutions[index])
         ax.plot(
             busan_xy[0], busan_xy[1],
-            marker="x", color="cyan", markersize=8, markeredgewidth=2,
+            marker="x", color="white", markersize=8, markeredgewidth=2,
         )
         ax.set_title(f"t = {times[index] / 365.0:.2f} years")
         ax.set_aspect("equal")
 
     fig.colorbar(image, ax=axes, label="Population density (u)", shrink=0.8)
+    fig.suptitle(
+        f"Cyan = spread boundary (u >= {SPREAD_BOUNDARY_FRACTION_OF_MAX:.0%} of that frame's max), "
+        f"green = density hotspots"
+    )
 
     output_path = OUTPUT_DIR / "snapshots.png"
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"\nSnapshot figure saved to:\n{output_path}")
+
+
+def save_spread_analysis_figure(land_mask, x_centers, y_centers, final_u, busan_xy):
+    """
+    Save a figure of the final-frame density with the spreading front
+    overlaid as a contour (cells where u crosses
+    SPREAD_BOUNDARY_FRACTION_OF_MAX * max(u)) and the densest cells
+    marked as hotspots. See the note by SPREAD_BOUNDARY_FRACTION_OF_MAX
+    for why this is relative to the run's own max rather than to C_u.
+    """
+
+    extent = [
+        x_centers[0] - GRID / 2, x_centers[-1] + GRID / 2,
+        y_centers[0] - GRID / 2, y_centers[-1] + GRID / 2,
+    ]
+
+    land_u = np.where(land_mask, final_u, 0.0)
+    max_density = float(np.nanmax(land_u))
+    vmax = max(max_density, 1e-12)
+
+    fig, ax = plt.subplots(figsize=(9, 9))
+    ax.imshow(land_mask, origin="lower", extent=extent, cmap="gray", alpha=0.4)
+
+    image = ax.imshow(
+        np.where(land_mask, final_u, np.nan),
+        origin="lower", extent=extent, cmap="inferno",
+        vmin=0.0, vmax=vmax,
+    )
+
+    if max_density > 0:
+        draw_spread_overlay(ax, land_mask, x_centers, y_centers, final_u, linewidth=2, marker_size=60)
+    else:
+        print("Final density is zero everywhere -- no boundary/hotspots to draw.")
+
+    ax.plot(
+        busan_xy[0], busan_xy[1],
+        marker="x", color="white", markersize=10, markeredgewidth=2,
+        label="Busan Port",
+    )
+
+    ax.set_xlabel("X (EPSG:5179, m)")
+    ax.set_ylabel("Y (EPSG:5179, m)")
+    ax.set_aspect("equal")
+    ax.legend(loc="upper right")
+    fig.colorbar(image, ax=ax, label="Population density (u)")
+    ax.set_title(
+        f"Spread boundary (u >= {SPREAD_BOUNDARY_FRACTION_OF_MAX:.0%} of max density) "
+        f"and density hotspots"
+    )
+
+    output_path = OUTPUT_DIR / "spread_analysis.png"
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    print(f"Spread analysis figure saved to:\n{output_path}")
 
 
 def run_interactive_viewer(land_mask, x_centers, y_centers, times, solutions, busan_xy):
@@ -308,7 +305,7 @@ def run_interactive_viewer(land_mask, x_centers, y_centers, times, solutions, bu
 def main():
 
     print("Loading preprocessed fields...")
-    land_mask, C_u, S_v, x_centers, y_centers = load_fields()
+    land_mask, C_u, S_v, x_centers, y_centers = load_vespa_fields(DATA_DIR, GRID_FACTOR)
     print(f"Grid shape: {land_mask.shape}")
 
     transformer = Transformer.from_crs(LON_LAT_CRS, WORKING_CRS, always_xy=True)
@@ -348,7 +345,7 @@ def main():
     initial_density = INITIAL_DENSITY_FRACTION * C_u[busan_row, busan_col]
     u0 = create_point_source(
         land_mask.shape, busan_row, busan_col,
-        radius_m=INITIAL_RADIUS_M, density=initial_density,
+        radius_m=INITIAL_RADIUS_M, density=initial_density, grid=GRID,
     )
     u0 = np.where(land_mask, u0, 0.0)
     if BACKEND == "gpu":
@@ -369,6 +366,7 @@ def main():
     print(f"Time series saved to:\n{timeseries_path}")
 
     save_snapshot_figure(land_mask, x_centers, y_centers, times, solutions, (busan_x, busan_y))
+    save_spread_analysis_figure(land_mask, x_centers, y_centers, solutions[-1], (busan_x, busan_y))
     run_interactive_viewer(land_mask, x_centers, y_centers, times, solutions, (busan_x, busan_y))
 
 
