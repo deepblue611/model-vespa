@@ -87,7 +87,7 @@ BUSAN_LAT = 35.1028
 D_U = 1_510_190.0   # m^2/day, random-walk diffusion (literature)
 CHI_U = 1e5*5    # m^2/day per unit of C_u, taxis sensitivity (placeholder)
 ALPHA = 0.00077041   # per day, intrinsic logistic growth rate (literature)
-BETA = 0.5 * ALPHA   # per day per unit v, competition strength (placeholder)
+BETA = 0.3 * ALPHA   # per day per unit v, competition strength (placeholder)
 K_V = 1.0         # scales normalized suitability into a native density (literature)
 
 INITIAL_RADIUS_M = 500.0   # ~1 grid cell: a founding introduction is
@@ -102,7 +102,7 @@ DT_SAFETY = 0.4
 # ~18 years minimum to cross the ~450 km Busan-to-far-corner span at the
 # front speed above (taxis, once CHI_U is set, should only shorten this);
 # add margin since that speed ignores taxis.
-TOTAL_TIME_DAYS = 365.0 * 20.0
+TOTAL_TIME_DAYS = 365.0 * 23.0
 SAVE_INTERVAL_DAYS = 90.0
 
 # The spread boundary is drawn where u crosses this fraction of the final
@@ -150,6 +150,54 @@ def draw_spread_overlay(ax, land_mask, x_centers, y_centers, u, linewidth=1.5, m
         x_centers[cols], y_centers[rows],
         marker="^", color="lime", edgecolors="black", s=marker_size, zorder=5,
     )
+
+
+def compute_spread_area_km2(land_mask, u, cell_area_km2):
+    """
+    Area (km^2) of cells where u crosses SPREAD_BOUNDARY_FRACTION_OF_MAX *
+    that frame's own max density -- same boundary definition as
+    draw_spread_overlay, so the area matches what the cyan contour encloses.
+    """
+
+    land_u = np.where(land_mask, u, 0.0)
+    max_density = float(np.nanmax(land_u))
+
+    if max_density <= 0:
+        return 0.0
+
+    boundary_level = SPREAD_BOUNDARY_FRACTION_OF_MAX * max_density
+    return float((land_u >= boundary_level).sum()) * cell_area_km2
+
+
+def compute_max_spread_distance_km(land_mask, u, busan_row, busan_col, grid_m):
+    """
+    Max straight-line distance (km) from Busan to any cell crossing the
+    same SPREAD_BOUNDARY_FRACTION_OF_MAX boundary used elsewhere.
+
+    This is the actual front reach, unlike sqrt(area/pi): Busan sits at a
+    coastal corner of the domain, so a lot of the "circle" an
+    area-equivalent radius assumes is ocean and gets cut off by the land
+    mask -- that systematically underestimates true reach and is why this
+    replaced the area-based radius for front-speed estimates.
+    """
+
+    land_u = np.where(land_mask, u, 0.0)
+    max_density = float(np.nanmax(land_u))
+
+    if max_density <= 0:
+        return 0.0
+
+    boundary_level = SPREAD_BOUNDARY_FRACTION_OF_MAX * max_density
+    rows, cols = np.nonzero(land_u >= boundary_level)
+
+    if len(rows) == 0:
+        return 0.0
+
+    distances_km = np.sqrt(
+        ((rows - busan_row) * grid_m) ** 2 + ((cols - busan_col) * grid_m) ** 2
+    ) / 1000.0
+
+    return float(distances_km.max())
 
 
 def save_snapshot_figure(land_mask, x_centers, y_centers, times, solutions, busan_xy):
@@ -361,8 +409,24 @@ def main():
     print(f"Done in {elapsed:.2f}s, saved {len(times)} frames.")
 
     total_population = solutions[:, land_mask].sum(axis=1)
+
+    cell_area_km2 = (GRID / 1000.0) ** 2
+    spread_area_km2 = np.array([
+        compute_spread_area_km2(land_mask, solutions[i], cell_area_km2)
+        for i in range(len(times))
+    ])
+    spread_max_distance_km = np.array([
+        compute_max_spread_distance_km(land_mask, solutions[i], busan_row, busan_col, GRID)
+        for i in range(len(times))
+    ])
+
     timeseries_path = OUTPUT_DIR / "timeseries.npz"
-    np.savez(timeseries_path, times=times, total_population=total_population)
+    np.savez(
+        timeseries_path, times=times, total_population=total_population,
+        spread_area_km2=spread_area_km2,
+        spread_max_distance_km=spread_max_distance_km,
+        spread_boundary_fraction_of_max=SPREAD_BOUNDARY_FRACTION_OF_MAX,
+    )
     print(f"Time series saved to:\n{timeseries_path}")
 
     save_snapshot_figure(land_mask, x_centers, y_centers, times, solutions, (busan_x, busan_y))
