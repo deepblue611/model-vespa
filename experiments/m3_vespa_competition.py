@@ -102,7 +102,7 @@ DT_SAFETY = 0.4
 # ~18 years minimum to cross the ~450 km Busan-to-far-corner span at the
 # front speed above (taxis, once CHI_U is set, should only shorten this);
 # add margin since that speed ignores taxis.
-TOTAL_TIME_DAYS = 365.0 * 23.0
+TOTAL_TIME_DAYS = 365.0 * 20.0
 SAVE_INTERVAL_DAYS = 90.0
 
 # The spread boundary is drawn where u crosses this fraction of the final
@@ -428,6 +428,16 @@ def main():
         spread_boundary_fraction_of_max=SPREAD_BOUNDARY_FRACTION_OF_MAX,
     )
     print(f"Time series saved to:\n{timeseries_path}")
+
+    # Per-cell u at every saved frame, land cells only (sea is always 0).
+    # experiments/m3_export_u_csv.py turns this into a lon/lat-indexed CSV.
+    u_fields_path = OUTPUT_DIR / "u_fields.npz"
+    np.savez_compressed(
+        u_fields_path, times=times, land_mask=land_mask,
+        x_centers=x_centers, y_centers=y_centers,
+        u_land=solutions[:, land_mask],
+    )
+    print(f"Per-cell u fields saved to:\n{u_fields_path}")
 
     save_snapshot_figure(land_mask, x_centers, y_centers, times, solutions, (busan_x, busan_y))
     save_spread_analysis_figure(land_mask, x_centers, y_centers, solutions[-1], (busan_x, busan_y))

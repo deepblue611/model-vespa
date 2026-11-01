@@ -12,6 +12,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+plt.rcParams["font.family"] = "Malgun Gothic"
+plt.rcParams["axes.unicode_minus"] = False
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
@@ -23,7 +26,7 @@ SPEED_OUTPUT_PATH = ROOT / "outputs" / "m3_vespa_competition" / "spread_speed_ti
 
 
 def plot_population(times_years, total_population):
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 3.25))
     ax.plot(times_years, total_population, marker="o", markersize=3)
     ax.set_xlabel("Time (years)")
     ax.set_ylabel("Total population (sum of u over land)")
@@ -38,7 +41,7 @@ def plot_population(times_years, total_population):
 def plot_spread_area(times_years, spread_area_km2, boundary_fraction):
     """Plot spread area vs. time with a linear trend line (km^2/yr)."""
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 3.25))
     ax.plot(times_years, spread_area_km2, marker="o", markersize=3, label="Spread area")
 
     valid = spread_area_km2 > 0
@@ -74,7 +77,7 @@ def plot_spread_distance(times_years, spread_max_distance_km, boundary_fraction)
     true reach. The trend's slope is the front-speed estimate (km/yr).
     """
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 3.25))
     ax.plot(times_years, spread_max_distance_km, marker="o", markersize=3, label="Max distance from Busan")
 
     valid = spread_max_distance_km > 0
@@ -89,9 +92,9 @@ def plot_spread_distance(times_years, spread_max_distance_km, boundary_fraction)
     else:
         print("Not enough nonzero-distance frames to fit a trend.")
 
-    ax.set_xlabel("Time (years)")
-    ax.set_ylabel(f"Max distance from Busan (km, u >= {boundary_fraction:.0%} of that frame's max)")
-    ax.set_title("Spread distance from Busan vs. time")
+    ax.set_xlabel("시간 (년)", fontsize=14)
+    ax.set_ylabel("확산 거리 (km)", fontsize=14)
+    #ax.set_title("Spread distance from Busan vs. time")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="lower right")
 
@@ -119,7 +122,7 @@ def plot_spread_speed(times_years, spread_max_distance_km):
 
     overall_speed, _ = np.polyfit(t, distance_km, 1)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 3.25))
     ax.plot(t, speed_km_per_year, marker="o", markersize=3, label="Instantaneous front speed")
     ax.axhline(
         overall_speed, color="gray", linestyle="--",
