@@ -24,6 +24,12 @@ AREA_OUTPUT_PATH = ROOT / "outputs" / "m3_vespa_competition" / "spread_area_time
 DISTANCE_OUTPUT_PATH = ROOT / "outputs" / "m3_vespa_competition" / "spread_distance_timeseries.png"
 SPEED_OUTPUT_PATH = ROOT / "outputs" / "m3_vespa_competition" / "spread_speed_timeseries.png"
 
+# Front-speed fits only use frames before the front reaches the far edge of
+# the landmass (~397 km from Busan): once it saturates there, the distance
+# curve flattens and a straight-line fit over it rewards whichever run
+# started slower, not whichever run is faster.
+FIT_MAX_DISTANCE_KM = 380.0
+
 
 def plot_population(times_years, total_population):
     fig, ax = plt.subplots(figsize=(8, 3.25))
@@ -38,7 +44,7 @@ def plot_population(times_years, total_population):
     print(f"Saved to:\n{POPULATION_OUTPUT_PATH}")
 
 
-def plot_spread_area(times_years, spread_area_km2, boundary_fraction):
+def plot_spread_area(times_years, spread_area_km2, boundary_label):
     """Plot spread area vs. time with a linear trend line (km^2/yr)."""
 
     fig, ax = plt.subplots(figsize=(8, 3.25))
@@ -57,7 +63,7 @@ def plot_spread_area(times_years, spread_area_km2, boundary_fraction):
         print("Not enough nonzero-area frames to fit a trend.")
 
     ax.set_xlabel("Time (years)")
-    ax.set_ylabel(f"Spread area (km$^2$, u >= {boundary_fraction:.0%} of that frame's max)")
+    ax.set_ylabel(f"Spread area (km$^2$, {boundary_label})")
     ax.set_title("Spread area vs. time")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="lower right")
@@ -67,7 +73,7 @@ def plot_spread_area(times_years, spread_area_km2, boundary_fraction):
     print(f"Saved to:\n{AREA_OUTPUT_PATH}")
 
 
-def plot_spread_distance(times_years, spread_max_distance_km, boundary_fraction):
+def plot_spread_distance(times_years, spread_max_distance_km, boundary_label):
     """
     Plot max distance from Busan (among cells crossing the spread
     boundary) vs. time, with a linear trend line -- this is the actual
@@ -80,7 +86,7 @@ def plot_spread_distance(times_years, spread_max_distance_km, boundary_fraction)
     fig, ax = plt.subplots(figsize=(8, 3.25))
     ax.plot(times_years, spread_max_distance_km, marker="o", markersize=3, label="Max distance from Busan")
 
-    valid = spread_max_distance_km > 0
+    valid = (spread_max_distance_km > 0) & (spread_max_distance_km < FIT_MAX_DISTANCE_KM)
     if valid.sum() >= 2:
         speed_km_per_year, intercept = np.polyfit(times_years[valid], spread_max_distance_km[valid], 1)
         ax.plot(
@@ -88,7 +94,10 @@ def plot_spread_distance(times_years, spread_max_distance_km, boundary_fraction)
             linestyle="--", color="gray",
             label=f"Linear trend (front speed): {speed_km_per_year:.2f} km/yr",
         )
-        print(f"Estimated front speed (max-distance-from-Busan linear fit): {speed_km_per_year:.3f} km/yr")
+        print(
+            f"Estimated front speed (max-distance-from-Busan linear fit, "
+            f"{boundary_label}, d < {FIT_MAX_DISTANCE_KM:.0f} km): {speed_km_per_year:.3f} km/yr"
+        )
     else:
         print("Not enough nonzero-distance frames to fit a trend.")
 
@@ -120,7 +129,8 @@ def plot_spread_speed(times_years, spread_max_distance_km):
     distance_km = spread_max_distance_km[valid]
     speed_km_per_year = np.gradient(distance_km, t)
 
-    overall_speed, _ = np.polyfit(t, distance_km, 1)
+    fit = distance_km < FIT_MAX_DISTANCE_KM
+    overall_speed, _ = np.polyfit(t[fit], distance_km[fit], 1)
 
     fig, ax = plt.subplots(figsize=(8, 3.25))
     ax.plot(t, speed_km_per_year, marker="o", markersize=3, label="Instantaneous front speed")
@@ -153,9 +163,15 @@ def main():
 
     plot_population(times_years, total_population)
 
+    if "spread_boundary_absolute" in data:
+        boundary_label = f"u >= {float(data['spread_boundary_absolute']):.0e}"
+    elif "spread_boundary_fraction_of_max" in data:
+        boundary_label = f"u >= {float(data['spread_boundary_fraction_of_max']):.0%} of frame max"
+    else:
+        boundary_label = "spread boundary"
+
     if "spread_area_km2" in data:
-        boundary_fraction = float(data["spread_boundary_fraction_of_max"])
-        plot_spread_area(times_years, data["spread_area_km2"], boundary_fraction)
+        plot_spread_area(times_years, data["spread_area_km2"], boundary_label)
     else:
         print(
             "timeseries.npz has no 'spread_area_km2' -- it was saved by an older "
@@ -164,8 +180,7 @@ def main():
         )
 
     if "spread_max_distance_km" in data:
-        boundary_fraction = float(data["spread_boundary_fraction_of_max"])
-        plot_spread_distance(times_years, data["spread_max_distance_km"], boundary_fraction)
+        plot_spread_distance(times_years, data["spread_max_distance_km"], boundary_label)
         plot_spread_speed(times_years, data["spread_max_distance_km"])
     else:
         print(

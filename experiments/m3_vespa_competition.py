@@ -105,16 +105,18 @@ DT_SAFETY = 0.4
 TOTAL_TIME_DAYS = 365.0 * 20.0
 SAVE_INTERVAL_DAYS = 90.0
 
-# The spread boundary is drawn where u crosses this fraction of the final
-# frame's own max density -- NOT a fraction of local carrying capacity
-# C_u. With these literature D_U/ALPHA values, u can stay many orders of
-# magnitude below C_u for a long time (the population diffuses across
-# most of the country well before it saturates locally anywhere -- see
-# the m3_chi_beta_sweep.py findings), so a C_u-relative "established"
-# threshold stays empty for a very long transient. A max-relative
-# threshold instead always traces the actual spread pattern, whatever
-# its absolute scale.
-SPREAD_BOUNDARY_FRACTION_OF_MAX = 0.05
+# The spread boundary is drawn where u crosses this fixed absolute
+# density, identical across runs (M3, M4, ...) so their fronts and front
+# speeds are directly comparable. It used to be 5% of each frame's own
+# max u, but competition lowers M3's max and with it its threshold, which
+# made M3 look as fast as (or faster than) the competition-free M4.
+# Not a fraction of C_u: u stays orders of magnitude below C_u for most of
+# the run, so a C_u-relative threshold would stay empty. Caveat: the
+# measured front speed depends on this value (no locked-in Fisher-KPP
+# front yet), so compare runs at the same threshold rather than reading
+# the speed as absolute. At 1e-5, M3's max u dips just below the
+# threshold around year ~3.7, so a few frames there report zero spread.
+SPREAD_BOUNDARY_ABSOLUTE = 1e-5
 HOTSPOT_TOP_N = 15   # densest land cells to mark
 
 
@@ -125,7 +127,7 @@ HOTSPOT_TOP_N = 15   # densest land cells to mark
 def draw_spread_overlay(ax, land_mask, x_centers, y_centers, u, linewidth=1.5, marker_size=30):
     """
     Draw the spread boundary contour (u crosses
-    SPREAD_BOUNDARY_FRACTION_OF_MAX * max(u) for this frame) and the
+    SPREAD_BOUNDARY_ABSOLUTE) and the
     densest cells as hotspot markers onto an existing axes. Shared by
     save_snapshot_figure (one frame per panel) and
     save_spread_analysis_figure (final frame only).
@@ -137,7 +139,9 @@ def draw_spread_overlay(ax, land_mask, x_centers, y_centers, u, linewidth=1.5, m
     if max_density <= 0:
         return
 
-    boundary_level = SPREAD_BOUNDARY_FRACTION_OF_MAX * max_density
+    boundary_level = SPREAD_BOUNDARY_ABSOLUTE
+    if max_density < boundary_level:
+        return
     X, Y = np.meshgrid(x_centers, y_centers)
     ax.contour(X, Y, land_u, levels=[boundary_level], colors="cyan", linewidths=linewidth)
 
@@ -154,8 +158,8 @@ def draw_spread_overlay(ax, land_mask, x_centers, y_centers, u, linewidth=1.5, m
 
 def compute_spread_area_km2(land_mask, u, cell_area_km2):
     """
-    Area (km^2) of cells where u crosses SPREAD_BOUNDARY_FRACTION_OF_MAX *
-    that frame's own max density -- same boundary definition as
+    Area (km^2) of cells where u crosses SPREAD_BOUNDARY_ABSOLUTE --
+    same boundary definition as
     draw_spread_overlay, so the area matches what the cyan contour encloses.
     """
 
@@ -165,14 +169,14 @@ def compute_spread_area_km2(land_mask, u, cell_area_km2):
     if max_density <= 0:
         return 0.0
 
-    boundary_level = SPREAD_BOUNDARY_FRACTION_OF_MAX * max_density
+    boundary_level = SPREAD_BOUNDARY_ABSOLUTE
     return float((land_u >= boundary_level).sum()) * cell_area_km2
 
 
 def compute_max_spread_distance_km(land_mask, u, busan_row, busan_col, grid_m):
     """
     Max straight-line distance (km) from Busan to any cell crossing the
-    same SPREAD_BOUNDARY_FRACTION_OF_MAX boundary used elsewhere.
+    same SPREAD_BOUNDARY_ABSOLUTE boundary used elsewhere.
 
     This is the actual front reach, unlike sqrt(area/pi): Busan sits at a
     coastal corner of the domain, so a lot of the "circle" an
@@ -187,7 +191,7 @@ def compute_max_spread_distance_km(land_mask, u, busan_row, busan_col, grid_m):
     if max_density <= 0:
         return 0.0
 
-    boundary_level = SPREAD_BOUNDARY_FRACTION_OF_MAX * max_density
+    boundary_level = SPREAD_BOUNDARY_ABSOLUTE
     rows, cols = np.nonzero(land_u >= boundary_level)
 
     if len(rows) == 0:
@@ -237,7 +241,7 @@ def save_snapshot_figure(land_mask, x_centers, y_centers, times, solutions, busa
 
     fig.colorbar(image, ax=axes, label="Population density (u)", shrink=0.8)
     fig.suptitle(
-        f"Cyan = spread boundary (u >= {SPREAD_BOUNDARY_FRACTION_OF_MAX:.0%} of that frame's max), "
+        f"Cyan = spread boundary (u >= {SPREAD_BOUNDARY_ABSOLUTE:.0e}), "
         f"green = density hotspots"
     )
 
@@ -250,9 +254,8 @@ def save_spread_analysis_figure(land_mask, x_centers, y_centers, final_u, busan_
     """
     Save a figure of the final-frame density with the spreading front
     overlaid as a contour (cells where u crosses
-    SPREAD_BOUNDARY_FRACTION_OF_MAX * max(u)) and the densest cells
-    marked as hotspots. See the note by SPREAD_BOUNDARY_FRACTION_OF_MAX
-    for why this is relative to the run's own max rather than to C_u.
+    SPREAD_BOUNDARY_ABSOLUTE) and the densest cells marked as hotspots.
+    See the note by SPREAD_BOUNDARY_ABSOLUTE for how it was chosen.
     """
 
     extent = [
@@ -290,7 +293,7 @@ def save_spread_analysis_figure(land_mask, x_centers, y_centers, final_u, busan_
     ax.legend(loc="upper right")
     fig.colorbar(image, ax=ax, label="Population density (u)")
     ax.set_title(
-        f"Spread boundary (u >= {SPREAD_BOUNDARY_FRACTION_OF_MAX:.0%} of max density) "
+        f"Spread boundary (u >= {SPREAD_BOUNDARY_ABSOLUTE:.0e}) "
         f"and density hotspots"
     )
 
@@ -425,7 +428,7 @@ def main():
         timeseries_path, times=times, total_population=total_population,
         spread_area_km2=spread_area_km2,
         spread_max_distance_km=spread_max_distance_km,
-        spread_boundary_fraction_of_max=SPREAD_BOUNDARY_FRACTION_OF_MAX,
+        spread_boundary_absolute=SPREAD_BOUNDARY_ABSOLUTE,
     )
     print(f"Time series saved to:\n{timeseries_path}")
 

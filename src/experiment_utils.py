@@ -45,11 +45,23 @@ def block_reduce_fields(land_mask, C_u, S_v, factor):
     return coarse_mask, coarse_C_u, coarse_S_v
 
 
-def load_vespa_fields(data_dir: Path, grid_factor: int = 1):
-    """Load the 500m fields, optionally block-reduced by `grid_factor`."""
+def load_vespa_fields(data_dir: Path, grid_factor: int = 1, back_transform_log1p: bool = False):
+    """
+    Load the 500m fields, optionally block-reduced by `grid_factor`.
+
+    The stored C_u is the SAM's predicted ln(mean trap catch + 1) (Kim et
+    al. 2023, response log(abundance + 1), R's natural log). With
+    `back_transform_log1p=True` it is returned on the linear scale,
+    expm1(C_u) = expected V. velutina catch per trap per month (Sep/Oct).
+    The back-transform is applied at 500m, *before* block-averaging, so a
+    coarse cell's value is the mean catch of its sub-cells rather than the
+    expm1 of a mean log.
+    """
 
     land_mask = np.load(data_dir / "land_mask_500m.npy")
     C_u = np.load(data_dir / "carrying_capacity_Cu_500m.npy").astype(float)
+    if back_transform_log1p:
+        C_u = np.expm1(C_u)
     S_v = np.load(data_dir / "suitability_Sv_normalized_500m.npy").astype(float)
     x_centers = np.load(data_dir / "grid_x_500m.npy")
     y_centers = np.load(data_dir / "grid_y_500m.npy")
